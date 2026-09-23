@@ -17,14 +17,17 @@ docker run -d --name docket-redis -p 6379:6379 redis:7
 
 DB_HOST=localhost DB_NAME=docket DB_USER=docket DB_PASSWORD=docket \
 DB_SSL_MODE=disable REDIS_HOST=localhost REDIS_SSL=false \
-mvn spring-boot:run
+python -m docket.app
 ```
 
 Then <http://localhost:8080>.
 
 ```bash
-mvn verify     # what CI runs
+ruff check . && ruff format --check . && pytest -q
+bash scripts/smoke-test.sh "$(docker build -q .)"
 ```
+
+Neither runs in CI, which builds and ships only. Run them before you push.
 
 ## Layout
 
@@ -78,24 +81,24 @@ exactly what the proxy exists to prevent.
 
 ## Deployment
 
-One workflow, two jobs:
+One workflow, one job, three steps. It runs on pushes to `main` and does
+nothing else:
 
-| Job | Runs on | Does |
-|---|---|---|
-| `test` | pull requests and pushes | `mvn verify` |
-| `build` | pushes to `main`, only if `test` passed | build, smoke test, push to ECR |
+| Step | Does |
+|---|---|
+| Build | `docker build` |
+| Publish deploy config | renders `taskdef.json`, zips it with `appspec.yaml`, uploads it |
+| Push image | moves `:latest` in ECR |
 
-The smoke test runs the built image with no database and waits for liveness,
-which works precisely because liveness is shallow. It also asserts the container
-is not running as root — a property of the Dockerfile that no unit test can
-check.
+The order is the point. Moving `:latest` is what fires the EventBridge rule
+that starts the pipeline, so the descriptors have to be in place before the
+image lands — publish, then push.
 
-`needs: test` means nothing reaches ECR past a failing test. Only `build` gets
-`id-token: write`; there are no AWS access keys anywhere.
+Authentication is OIDC; there are no AWS access keys anywhere.
 
-The publish order matters. The workflow uploads `config/deploy.zip` first,
-then moves `:latest`. Moving `:latest` is what fires the EventBridge rule, so
-the descriptors are always in place before anything can react to the image.
+**There is no test gate.** Linting, the unit tests and the smoke test are
+local commands, listed under Running it above. If you want one back, it is a
+step, not a job.
 
 Two repository settings, and neither is an account identifier:
 
