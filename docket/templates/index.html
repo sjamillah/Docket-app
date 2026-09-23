@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Docket</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<header class="mast">
+  <div class="mast__inner">
+    <h1 class="wordmark">Docket</h1>
+    <p class="count">
+      <span class="count__n">{{ open }}</span>
+      <span class="count__label">still open</span>
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <form class="compose" method="post" action="{{ url_for('create') }}">
+    <label class="sr-only" for="title">What needs doing</label>
+    <input class="compose__title" id="title" name="title" type="text"
+           placeholder="What needs doing?" maxlength="120" required autocomplete="off">
+    <label class="sr-only" for="notes">Detail</label>
+    <input class="compose__notes" id="notes" name="notes" type="text"
+           placeholder="Detail, if it needs any" maxlength="500" autocomplete="off">
+    <button class="btn btn--primary" type="submit">Add</button>
+  </form>
+
+  {% if not tasks %}
+    <p class="empty">Nothing on the docket. Add the first thing above.</p>
+  {% else %}
+    <ul class="list">
+      {% for t in tasks %}
+        <li class="card {{ 'card--done' if t.done }}">
+
+          <form class="card__check" method="post"
+                action="{{ url_for('toggle', task_id=t.id) }}">
+            <button class="tick" type="submit"
+                    aria-label="{{ 'Reopen' if t.done else 'Mark done' }}"
+                    aria-pressed="{{ 'true' if t.done else 'false' }}">
+              <svg viewBox="0 0 20 20" aria-hidden="true">
+                <path d="M5 10.5l3.2 3.2L15 7" fill="none" stroke="currentColor"
+                      stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </form>
+
+          <div class="card__body">
+            <p class="card__title">{{ t.title }}</p>
+            {% if t.notes %}<p class="card__notes">{{ t.notes }}</p>{% endif %}
+            <p class="card__meta">
+              <time datetime="{{ t.created_at.isoformat() }}">
+                {{ t.created_at.strftime('%d %b, %H:%M') }}
+              </time>
+            </p>
+          </div>
+
+          <details class="card__edit">
+            <summary class="btn btn--quiet" aria-label="Edit">Edit</summary>
+            <form class="editform" method="post" action="{{ url_for('edit', task_id=t.id) }}">
+              <input type="text" name="title" value="{{ t.title }}" maxlength="120" required>
+              <input type="text" name="notes" value="{{ t.notes or '' }}" maxlength="500"
+                     placeholder="Detail, if it needs any">
+              <button class="btn btn--primary" type="submit">Save</button>
+            </form>
+          </details>
+
+          <form method="post" action="{{ url_for('delete', task_id=t.id) }}">
+            <button class="btn btn--quiet btn--danger" type="submit" aria-label="Delete">Delete</button>
+          </form>
+
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</main>
+
+<footer class="foot">
+  <span>Reads served from Redis &middot; writes through RDS Proxy</span>
+</footer>
+
+</body>
+</html>

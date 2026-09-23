@@ -1,0 +1,12 @@
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        # CodeDeploy substitutes the task definition the pipeline registered.
+        # The literal string is what it looks for, so it is not a placeholder
+        # anyone fills in.
+        TaskDefinition: <TASK_DEFINITION>
+        LoadBalancerInfo:
+          ContainerName: app
+          ContainerPort: 8080
