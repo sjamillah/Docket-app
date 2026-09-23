@@ -1,18 +1,19 @@
 FROM python:3.12-slim-bookworm
 
-# curl is what the container health check uses; nothing else needs installing.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends curl \
- && rm -rf /var/lib/apt/lists/* \
- && useradd --system --uid 10001 --create-home docket
+# No curl: the container health check shells out to python, which is already
+# here. Nothing else in the image needs installing.
+RUN useradd --system --uid 10001 --create-home docket
 
 WORKDIR /app
 
 # Dependencies resolve from the project file alone, so this layer survives a
-# code change.
+# code change. The project itself is never installed: that would drop an
+# egg-info directory into the tree, and nothing needs it — the package sits
+# at /app/docket and pytest finds it through pythonpath.
 COPY pyproject.toml ./
-COPY scripts/install-deps.sh ./scripts/
-RUN bash scripts/install-deps.sh
+RUN python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > deps.txt \
+ && pip install --no-cache-dir -r deps.txt \
+ && rm deps.txt
 
 COPY --chown=docket:docket docket ./docket
 

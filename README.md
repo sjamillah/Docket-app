@@ -1,7 +1,7 @@
 # Docket
 
 A task list. Reads come from Redis, writes go to PostgreSQL through an RDS
-Proxy. Spring Boot, server-rendered, one container.
+Proxy. Flask, server-rendered, one container.
 
 Infrastructure lives in [Docket-infra](https://github.com/sjamillah/Docket-infra).
 
@@ -24,38 +24,41 @@ Then <http://localhost:8080>.
 
 ```bash
 ruff check . && ruff format --check . && pytest -q
-bash scripts/smoke-test.sh "$(docker build -q .)"
 ```
 
-Neither runs in CI, which builds and ships only. Run them before you push.
+These do not run in CI, which builds and ships only. Run them before you push.
 
 ## Layout
 
 | Path | Holds |
 |---|---|
-| `Task.java` | A record. Serialised into Redis, so it stays plain data |
-| `TaskRepository.java` | One query, in the order the page asks for |
-| `TaskService.java` | Where the caching lives: `@Cacheable` on the read, `@CacheEvict` on every write |
-| `CacheConfig.java` | JSON serialisation and a one-hour backstop TTL |
-| `TaskController.java` | The pages, and `/api/tasks` for proving the cache works |
-| `db/migration/V1__tasks.sql` | Flyway. One table, one index |
+| `docket/config.py` | Every value the container needs, read once at import |
+| `docket/db.py` | The `Task` dataclass, the connection pool, the schema, and one query per operation |
+| `docket/cache.py` | Redis in front of that query: read, write, invalidate, and a reachability probe |
+| `docket/tasks.py` | The only module the views call. Reads try the cache, writes invalidate it |
+| `docket/app.py` | The routes, and `/api/tasks` for proving the cache works |
+| `docket/templates/`, `docket/static/` | One page and one stylesheet |
 | `deploy/` | `taskdef.json` and `appspec.yaml`, rendered by CI and read by CodeDeploy |
 
 ## How the caching works
 
-`TaskService.all()` is `@Cacheable`. The first read after a write queries
-PostgreSQL and stores the result; every read after that is answered by Redis
-until something changes.
+`tasks.all_tasks()` reads through `cache`. The first call after a write
+queries PostgreSQL and stores the result under `tasks:all`; every call after
+that is answered by Redis until something changes.
 
-Every mutating method carries `@CacheEvict` on the same key. Whole-list
-eviction rather than patching the cached list: the list is small, and eviction
-that is obviously correct beats eviction that is clever.
+Every mutation in `tasks.py` calls `cache.invalidate()` on the same key.
+Whole-list invalidation rather than patching the cached list: the list is
+small, and invalidation that is obviously correct beats invalidation that is
+clever.
 
-`CacheKeyTest` asserts that relationship by reflection — it reads the
-`@Cacheable` key off the read method and fails if any public mutating method
-does not evict exactly it. A new mutation added without an eviction would
-otherwise be invisible until the TTL expired, which is the kind of bug that
-looks like "the database is slow to update".
+`test_every_mutation_invalidates` is parametrised over every public mutation
+in `tasks.py` and fails if one does not evict the key. A mutation added
+without an eviction would otherwise be invisible until the TTL expired, which
+is the kind of bug that looks like "the database is slow to update".
+
+A Redis outage is survivable in both directions: `cache.read()` returns `None`
+and the caller falls through to PostgreSQL, and every write path logs and
+continues.
 
 To see it working:
 
@@ -72,12 +75,15 @@ Two endpoints, and the split is deliberate.
 
 | Endpoint | Checks | Used by |
 |---|---|---|
-| `/actuator/health/liveness` | nothing external | the ALB target group and the container health check |
-| `/actuator/health/readiness` | the database and Redis | humans, and a canary if one is ever added |
+| `/health` | nothing external | the ALB target group and the container health check |
+| `/ready` | the database and Redis | humans, and a canary if one is ever added |
 
-The target group uses **liveness**. A deep check there would fail every target
-at once during an RDS failover and turn a short blip into an outage — which is
+The target group uses `/health`. A deep check there would fail every target at
+once during an RDS failover and turn a short blip into an outage — which is
 exactly what the proxy exists to prevent.
+
+`/ready` returns 503 only when PostgreSQL is unreachable. Redis being down is
+reported as `degraded` with a 200, because reads still work.
 
 ## Deployment
 
@@ -119,7 +125,7 @@ ARNs, endpoints, the secret ARN, the region — has to already be in the file,
 and none of it exists until the infrastructure is up.
 
 So the committed file carries placeholders, and
-`scripts/publish-deploy-config.sh` renders them on every build:
+the workflow's **Publish deploy config** step renders them on every build:
 
 | Placeholder | Published by |
 |---|---|
@@ -139,11 +145,8 @@ registers the first revision from that template; every later revision comes
 from this file. If you add a variable in one, add it in the other, or the
 first blue/green deployment will quietly drop it.
 
-To try it locally, with credentials that can read `/docket/*`:
-
-```bash
-AWS_REGION=$(aws configure get region) bash scripts/publish-deploy-config.sh
-```
+There is no script to run locally: the substitution is six `sed` expressions
+in the workflow, and reading it there is the documentation.
 
 ### Deploying a config-only change
 
@@ -182,33 +185,37 @@ aws ecs describe-tasks --cluster docket-cluster --region $R \
 | `unable to pull secrets` | stale secret ARN — rerun the build, which re-resolves it |
 | `unable to pull image` | no route to ECR; check the `ecr.api` and `ecr.dkr` endpoints |
 | `failed ELB health checks` | the container is up but liveness is not answering on 8080 |
-| `Essential container ... exited` | read `/ecs/docket`; usually Flyway cannot reach the proxy |
+| `Essential container ... exited` | read `/ecs/docket`; usually `create_schema()` cannot reach the proxy |
 
 Cluster is `docket-cluster`, service `docket-service`, task definition family
 and log group both plain `docket`.
 
 ## Notes on the design
 
-**Hikari is capped at five connections.** The proxy owns pooling; a large pool
-in the task just holds connections the proxy would otherwise be free to share,
-which defeats the point of having it.
+**The pool is capped at five connections.** `POOL_MAX` in `config.py`. The
+proxy owns pooling; a large pool in the task just holds connections the proxy
+would otherwise be free to share, which defeats the point of having it.
 
-**The image is layered.** `spring-boot-maven-plugin` splits dependencies from
-application code, so a code change rebuilds one thin layer rather than shipping
-the JVM and every jar again.
+**The image is layered.** `pyproject.toml` is copied and the dependencies
+installed before the application code, so a code change rebuilds one thin
+layer rather than reinstalling Flask and psycopg every time.
 
-**`MaxRAMPercentage=70`.** Fargate gives the container a hard memory limit, and
-without this the JVM sizes its heap from the host and gets killed.
+**No curl in the image.** The container health check shells out to `python`,
+which is already there, so nothing is installed on top of the base image.
 
-**Flyway rather than schema-on-start.** It records what it ran, which is what
-makes two tasks starting simultaneously harmless.
+**`CREATE TABLE IF NOT EXISTS` rather than a migration tool.** One table and
+one index do not justify one, and `IF NOT EXISTS` throughout is what makes two
+tasks starting simultaneously harmless. `SKIP_SCHEMA=1` skips it entirely,
+which is how the image runs without a database.
 
 ## Known gaps
 
-- Schema changes are forward-only; there are no down migrations.
+- There is no migration history. `create_schema()` is additive only, so a
+  column that needs changing needs doing by hand.
 - The base image is pinned by tag, not digest, so two builds a week apart can
   differ. ECR scan-on-push covers the OS packages.
-- Nothing scans the Java dependencies. Inspector enhanced scanning on the
+- Nothing scans the Python dependencies. Inspector enhanced scanning on the
   registry is the AWS-side answer.
+- CI does not run the tests. `ruff` and `pytest` are local commands.
 - No rate limiting. With no accounts, the only limits are the task count and
   whatever the ALB allows.

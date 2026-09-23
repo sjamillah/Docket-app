@@ -40,10 +40,34 @@ jobs:
       # Before the push, not after: moving :latest is what fires the
       # EventBridge rule, so the descriptors have to already be in place by
       # the time the pipeline starts reading them.
+      #
+      # Every value comes from the stack that created the thing it names, so
+      # nothing account-specific is committed and nothing is a secret.
       - name: Publish deploy config
-        run: bash scripts/publish-deploy-config.sh
+        run: |
+          p() { aws ssm get-parameter --name "/docket/$1" --query Parameter.Value --output text; }
+          sed -e "s|<TASK_ROLE_ARN>|$(p task-role-arn)|g" \
+              -e "s|<EXECUTION_ROLE_ARN>|$(p task-execution-role-arn)|g" \
+              -e "s|<DB_PROXY_ENDPOINT>|$(p db-proxy-endpoint)|g" \
+              -e "s|<DB_SECRET_ARN>|$(p db-secret-arn)|g" \
+              -e "s|<CACHE_ENDPOINT>|$(p cache-endpoint)|g" \
+              -e "s|<AWS_REGION>|$AWS_REGION|g" \
+              deploy/taskdef.json > taskdef.json
+          # <IMAGE1_NAME> stays: CodeDeploy replaces it with the image digest.
+          if grep -o '<[A-Z0-9_]*>' taskdef.json | grep -qv '<IMAGE1_NAME>'; then
+            echo "a placeholder survived substitution:" >&2
+            grep -o '<[A-Z0-9_]*>' taskdef.json | grep -v '<IMAGE1_NAME>' >&2
+            exit 1
+          fi
+          python -c "import json; json.load(open('taskdef.json'))"
+          # -j so both land at the zip root, which is what the pipeline unpacks.
+          zip -qj deploy.zip taskdef.json deploy/appspec.yaml
+          aws s3 cp deploy.zip "s3://$(p artifact-bucket)/config/deploy.zip"
 
+      # :latest is the only tag in ECR, and the one the EventBridge rule
+      # watches. The pipeline reads the digest out of imageDetail.json.
       - name: Push image
         run: |
-          repository="$(aws ssm get-parameter --name /docket/ecr-repository-name --query Parameter.Value --output text)"
-          bash scripts/publish-image.sh ci-candidate "${{ steps.ecr.outputs.registry }}" "$repository"
+          remote="${{ steps.ecr.outputs.registry }}/$(aws ssm get-parameter --name /docket/ecr-repository-name --query Parameter.Value --output text)"
+          docker tag ci-candidate "$remote:latest"
+          docker push "$remote:latest"
